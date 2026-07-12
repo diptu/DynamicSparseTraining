@@ -1,0 +1,22 @@
+# Second model. Per Plan standing rule #4, Qwen is the FIRST allowed scope cut —
+# drop this config (single-model paper) before cutting anything else.
+model:
+  name: Qwen/Qwen2.5-1.5B
+  dtype: bfloat16
+  device: cuda
+
+data:
+  dataset: wikitext
+  subset: wikitext-2-raw-v1
+  split: test
+  max_samples: 128
+  max_seq_len: 2048
+
+quant:
+  bit_budgets: [2, 3, 4]
+  key_granularity: per_channel
+  value_granularity: per_token
+
+output:
+  stats_path: results/stats/qwen25_1.5b.json
+  figures_dir: results/figures

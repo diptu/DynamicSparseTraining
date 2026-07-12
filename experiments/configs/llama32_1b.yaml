@@ -1,0 +1,21 @@
+# Config-driven run: one YAML per experiment (see experiments/*.py).
+model:
+  name: meta-llama/Llama-3.2-1B
+  dtype: bfloat16
+  device: cuda
+
+data:
+  dataset: wikitext
+  subset: wikitext-2-raw-v1
+  split: test
+  max_samples: 128
+  max_seq_len: 2048
+
+quant:
+  bit_budgets: [2, 3, 4]        # average bits swept in experiments
+  key_granularity: per_channel
+  value_granularity: per_token
+
+output:
+  stats_path: results/stats/llama32_1b.json
+  figures_dir: results/figures

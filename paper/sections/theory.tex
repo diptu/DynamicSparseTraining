@@ -1,0 +1,24 @@
+% Section: Theory. THE CORE. Value-side bound = Week 1; key-side + corollary = Weeks 2-3.
+% Lock this section at the Week 3 gate once the numerical check in tests/test_bound.py passes.
+
+% Lemma (value-side, easy half): attention output o = a·V is a convex combination
+% (weights sum to 1), so value perturbations pass through at most linearly.
+\begin{lemma}[Value error does not amplify]
+% TODO(Week 1): statement + proof.
+\end{lemma}
+
+% Lemma (key-side, hard half): a key perturbation is scaled by the query norm, passed
+% through the softmax map (Lipschitz), then scaled by the spread of the values.
+\begin{lemma}[Key error amplifies through softmax]
+% TODO(Week 2-3): softmax-Lipschitz statement + proof. Fallback: looser triangle bound.
+\end{lemma}
+
+\begin{theorem}[First-order output-error bound]
+% \|õ − o\| ≤ C · (‖q‖/√d) · diam(V) · r_K · 2^{−b_K} + r_V · 2^{−b_V}
+% TODO(Week 2-3).
+\end{theorem}
+
+\begin{corollary}[Optimal bit allocation]
+% b_K − b_V ≈ log2( ‖q‖ · diam(V) / √d ) + log2( r_K / r_V )
+% TODO(Week 2-3): Lagrangian on the bound at fixed target error.
+\end{corollary}

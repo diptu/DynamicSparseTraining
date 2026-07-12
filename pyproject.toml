@@ -1,0 +1,49 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "kvbits"
+version = "0.1.0"
+description = "First-order analysis of KV cache quantization with optimal key-value bit allocation."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { file = "LICENSE" }
+authors = [{ name = "Nazmul Alam Diptu", email = "diptunazmulalam@gmail.com" }]
+keywords = ["kv-cache", "quantization", "transformers", "llm-inference", "bit-allocation"]
+
+# Core deps kept minimal so `tests/test_bound.py` runs on a CPU-only clone (Plan Week 3 gate).
+dependencies = [
+    "numpy>=1.24",
+    "torch>=2.1",
+]
+
+[project.optional-dependencies]
+# Heavy path: real models + evaluation. Not needed to verify the bound numerically.
+experiments = [
+    "transformers>=4.44",
+    "datasets>=2.19",
+    "pyyaml>=6.0",
+    "tqdm>=4.66",
+]
+plot = [
+    "matplotlib>=3.8",
+    "pandas>=2.2",
+]
+dev = [
+    "pytest>=8.0",
+    "ruff>=0.5",
+]
+
+[project.urls]
+Homepage = "https://github.com/diptu/theoretical-kv-cache"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/kvbits"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+src = ["src"]

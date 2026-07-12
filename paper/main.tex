@@ -1,0 +1,47 @@
+% "Where Should the Bits Go? A First-Order Analysis of KV Cache Quantization
+%  with Optimal Key--Value Bit Allocation"
+% Plan Week 1: stub all section headers + a one-line claim each. Build: pdflatex main.
+\documentclass[11pt]{article}
+
+\usepackage{amsmath,amssymb,amsthm}
+\usepackage{graphicx}
+\usepackage{hyperref}
+
+\newtheorem{theorem}{Theorem}
+\newtheorem{lemma}{Lemma}
+\newtheorem{corollary}{Corollary}
+
+\title{Where Should the Bits Go? \\
+  \large A First-Order Analysis of KV Cache Quantization with
+  Optimal Key--Value Bit Allocation}
+\author{Nazmul Alam Diptu}
+\date{2026}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+% Week 7: write once the result's shape is known.
+KV cache quantization schemes consistently give keys more bits than values, but the
+allocation is hand-tuned. We derive a first-order perturbation bound for attention
+outputs under stochastic uniform quantization that yields a closed-form optimal
+key--value bit allocation, predictable per layer and per head from statistics
+measurable on a running model.
+\end{abstract}
+
+\section{Introduction}          % Claim: the K/V asymmetry is derivable, not tuned.
+\input{sections/intro}
+
+\section{Theory}                % Claim: value error is linear; key error amplifies through softmax.
+\input{sections/theory}
+
+\section{Experiments}           % Claim: the bound tracks measured error; derived allocation wins at matched bits.
+\input{sections/experiments}
+
+\section{Related Work}          % Claim: KIVI showed the asymmetry; we predict its magnitude.
+\input{sections/related}
+
+\section{Limitations and Future Work}
+% Claim: first-order only; rotations compose as the natural sequel.
+
+\end{document}
