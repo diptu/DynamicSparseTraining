@@ -15,6 +15,7 @@ keywords = ["kv-cache", "quantization", "transformers", "llm-inference", "bit-al
 # Core deps kept minimal so `tests/test_bound.py` runs on a CPU-only clone (Plan Week 3 gate).
 dependencies = [
     "numpy>=1.24",
+    "pandas>=2.3.3",
     "torch>=2.1",
 ]
 
@@ -47,3 +48,10 @@ testpaths = ["tests"]
 [tool.ruff]
 line-length = 100
 src = ["src"]
+
+[dependency-groups]
+dev = [
+    "mypy>=2.2.0",
+    "pytest>=9.1.1",
+    "ruff>=0.15.21",
+]

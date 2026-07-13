@@ -77,9 +77,28 @@ Formal statements and proofs: [`paper/sections/theory.tex`](paper/) · proof not
 
 Evaluation: perplexity (WikiText-2) + LongBench subsets, at 2/3/4-bit average budgets.
 
+## A long-term research repository
+
+This repo documents the **entire journey** of the idea, not just the final paper. The narrative
+map — how literature, reproductions, benchmarks, experiments, the report, blog posts, the paper,
+and PhD application materials feed each other — lives in **[`JOURNEY.md`](JOURNEY.md)**.
+
 ## Repository structure
 
 ```
+├── JOURNEY.md        the narrative map across all eight artifacts (start here)
+├── Plan.md           the paper's 10-week outcome-based plan (source of truth for sequencing)
+│
+├── docs/             the prose artifacts
+│   ├── literature/      standing literature review (indexed notes + bibliography.bib)
+│   ├── reports/         technical report — the unabridged record, incl. negative results
+│   ├── blog/            blog posts — the translation layer for a general audience
+│   └── applications/    PhD application materials (SOP, research statement, CV, tracker)
+│
+├── research/         code-bearing scaffolding around the experiments
+│   ├── reproductions/   prior methods (QJL, KIVI) re-run and matched to reported numbers
+│   └── benchmarks/      frozen evaluation protocol + leaderboard (RESULTS.md)
+│
 ├── paper/            LaTeX source, proof notes, reading notes
 ├── src/kvbits/       installable package
 │   ├── stats.py         per-layer/head statistics hooks
@@ -88,6 +107,7 @@ Evaluation: perplexity (WikiText-2) + LongBench subsets, at 2/3/4-bit average bu
 │   ├── bounds.py        predicted error from the bound
 │   └── patch.py         HF attention patching for on-the-fly KV quantization
 ├── experiments/      config-driven experiment scripts (one yaml per run)
+├── weeks/            weekly journal — one file per week, tracking the Plan
 ├── results/          raw run outputs (committed — figures regenerate without a GPU)
 ├── scripts/          plotting; every paper figure is a script output
 └── tests/            quantizer correctness + numerical bound verification

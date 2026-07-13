@@ -4,13 +4,26 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Current state
 
-This repository is **pre-code**. It currently contains only planning and specification documents:
+This repository is a **long-term research home** that documents the whole journey of one idea,
+scaffolded but pre-results. It is organized around eight artifacts — see **`JOURNEY.md`** for the
+map. The code trees are skeletons: modules and tests exist with docstrings/TODOs, but the proof,
+statistics, experiments, and figures are not done yet.
 
-- `README.md` — the research vision and intended package layout
-- `Plan.md` — an 8-week execution plan with weekly exit criteria and git tags
-- `Requirements.md` — functional spec for a separate "Live Paper" web platform
+- `README.md` — research vision, main result, repository structure
+- `JOURNEY.md` — the narrative map tying all eight artifacts together (read this first)
+- `Plan.md` — the paper's 10-week outcome-based plan (source of truth for sequencing)
+- `Requirements.md` — functional spec for a separate "Live Paper" web platform (not built)
 
-None of the source trees described below (`src/kvbits/`, `experiments/`, `paper/`, `tests/`, or the Next.js app) exist yet. Commands in `README.md` (`pip install -e .`, `pytest tests/test_bound.py`) will not run until that scaffolding is created — the earliest tasks in `Plan.md` (Week 1) are to create it. When asked to "run tests" or "build," first check whether the relevant files exist; do not assume the README reflects the working tree.
+The journey layer (added around the original paper scaffold):
+
+- `docs/literature/` — standing literature review (per-paper notes, `bibliography.bib`, thematic reviews). Supersedes the old "notes go straight into `related.tex`" convention: notes live here once; the paper cites from here. `paper/sections/related.tex` is a *curated subset*.
+- `docs/reports/` — the technical report: the unabridged record incl. negative results. Write it as you go so the paper is an editing job.
+- `docs/blog/` — blog posts (Markdown + front-matter, portable to the Next.js "Live Paper").
+- `docs/applications/` — PhD application materials (templates only; do not fabricate personal content).
+- `research/reproductions/` — prior methods (QJL, KIVI) re-run and matched to reported numbers before they become baselines.
+- `research/benchmarks/` — the frozen eval protocol (`protocol.md`) and leaderboard (`RESULTS.md`).
+
+Most content is index + template scaffolding: real content lands as the Plan progresses. When asked to "run tests" or "build," check whether the relevant files exist and are implemented; the scaffolds have TODOs, not finished code. The Next.js app does not exist.
 
 ## What this project is
 
