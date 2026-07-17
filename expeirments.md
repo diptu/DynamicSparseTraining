@@ -1,320 +1,158 @@
-# Kernel-Native, Score-Free KV Cache Compression — Experiment Design
+# Effective Dimension Predicts the Sparse Double Descent Peak
 
-**Status:** Draft v1 · **Owner:** Nazmul Alam · **Scope:** long-context autoregressive inference
+**Working title:** *One Axis to Rule Them All: Collapsing Sparse Double Descent Curves onto Effective Dimension*
 
----
-
-## 1. Summary
-
-Nearly every strong KV-cache eviction method (H2O, SnapKV, Ada-KV) ranks tokens by the attention *scores* they receive. But FlashAttention computes attention with a tiled online-softmax and **never materializes the N×N score matrix** — it only emits the per-query log-sum-exp (the softmax denominator). So score-based methods must fall back to a slow, materialized-attention path to get the signal they need, forfeiting the very kernel that makes long context affordable.
-
-This experiment asks: **can token importance be estimated from quantities that are cheap and available without the score matrix, closely enough to match score-based eviction quality while keeping FlashAttention?** If yes, the accuracy-per-wall-clock frontier moves, because we no longer have to choose between *fast-but-dumb* (StreamingLLM) and *smart-but-slow* (H2O).
-
-The deliverable is a PyTorch harness that (a) implements a family of **score-free importance proxies**, (b) implements score-based and position-only **baselines**, and (c) measures both quality-at-budget **and** end-to-end latency/memory so the kernel-compatibility advantage is actually counted.
+**Goal:** A preprint-quality result + targeted professor outreach → fully funded PhD offer, Fall 2027.
 
 ---
 
-## 2. Background and the specific gap
+## 1. Hypothesis
 
-Standard per-key importance for a key at position `j` is the total attention mass it receives across all query positions:
+The sparse double descent (SDD) test-error peak is governed by **effective dimension** (measured from the Hessian eigenspectrum), not nominal sparsity.
 
-```
-imp(j) = Σ_i  softmax_j( q_i · k_j / √d )
-```
+**Falsifiable prediction:** A dynamic sparse training (DST) network and a statically pruned network at the *same nominal sparsity* have *different* effective dimensions — so their SDD peaks occur at **different nominal sparsities** but the **same effective dimension**. Plotting test error vs. effective dimension collapses both curves onto one.
 
-Computing this exactly requires the full score matrix `S ∈ R^{N×N}` — the object FlashAttention deliberately never forms. What FlashAttention *does* return cheaply:
-
-- per-query log-sum-exp `lse_i` (the softmax denominator), and
-- anything you can compute from `K`, `V`, `Q` directly without their pairwise product (norms, projections onto a few fixed directions).
-
-So the design constraint is precise:
-
-> An importance signal is **kernel-native** iff it can be computed without materializing `S` (or any O(N²) intermediate), ideally fused into or run alongside the attention kernel in O(N·d) or O(r·N·d) with `r ≪ N`.
-
-Note that **StreamingLLM is already kernel-native** — "keep the first few sink tokens plus a recent window" needs no scores at all. It is therefore the honest baseline to beat, not full attention. The open question is whether *content-aware* score-free signals beat *position-only* StreamingLLM and approach *score-based* H2O.
+**Kill condition:** If curves do not collapse within confidence bands under any standard effective-dimension definition, the hypothesis is falsified. (This is a publishable negative result — it would show effective dimension is *not* the governing quantity, contra the parameter-counting literature.)
 
 ---
 
-## 3. Research questions and hypotheses
+## 2. Positioning: the "right axis" resolution (lit review complete — novelty confirmed)
 
-- **RQ1 (quality).** How much of the quality gap between StreamingLLM (position-only, kernel-native) and H2O (score-based, kernel-incompatible) can score-free content proxies recover at a fixed cache budget?
-- **RQ2 (efficiency).** What is the true end-to-end cost of the score-based methods once you account for leaving the fast kernel, and how much of that does the proxy approach save?
-- **RQ3 (composition).** Which cheap signals matter — key norm, value norm, or a low-rank query-probe sketch — and do they compose?
+**The framing that sells this — the "U-Turn" argument:**
+- **Curth et al. (2023)** argue that much of "double descent" in classical methods is an *illusion created by plotting against the wrong complexity axis* — unfolding onto the right axis recovers the classical U-curve. They pose the problem; they don't resolve it for deep sparse networks.
+- **This experiment is the deep-learning resolution:** nominal sparsity is the wrong axis for SDD; effective dimension is the right one. The curve-collapse test is the direct empirical demonstration.
 
-**H1.** A low-rank query-probe sketch (below) recovers ≥70% of the StreamingLLM→H2O quality gap on LongBench at a 20–50% cache budget.
+**Supporting literature:**
+- **He et al. (ICML 2022):** established sparse double descent empirically — the phenomenon to be explained.
+- **Maddox et al. (2020), Abbas et al. (2021):** effective dimension from the Hessian eigenspectrum as a generalization metric — but used *descriptively* (correlates with generalization), never *predictively* (dictates peak location).
+- **Granziol et al. (2020):** Hessian bulk / flatness as general geometric properties — again analysis, not a predictive tool for the SDD phase transition.
 
-**H2.** At matched quality, the proxy method delivers strictly higher tokens/sec and lower peak memory than H2O because it retains FlashAttention throughout.
+**Confirmed gap (lit review, Jul 2026):** no existing work uses effective dimension to predict the SDD peak location, and no one uses the DST-vs-static gap as a controlled test of what governs the peak. Current work in the space is either algorithmic (new pruning/DST methods, e.g. GlobalPru) or geometric-descriptive.
 
-**H3.** Norms alone (‖k‖, ‖v‖) are weak; the probe sketch is what closes most of the gap.
-
-Each hypothesis has a pre-registered success threshold so the result is interpretable even if negative.
-
----
-
-## 4. Method: score-free importance proxies
-
-Four proxy families, from cheapest to most expressive. All are computed **per KV head** (respecting GQA grouping) and never touch an O(N²) object.
-
-**(P0) Position prior — StreamingLLM.** Keep `s` sink tokens + a recent window of size `w`. Free. This is the kernel-native reference, not our contribution; it is the score-free control.
-
-**(P1) Key/value norms.** `imp(j) = ‖k_j‖` or `‖v_j‖` or their product. O(N·d), trivially fused. Rationale: a large-norm key can dominate dot products; a large-norm value contributes more to the output when attended. Expected to be weak alone (H3) but a useful ablation floor.
-
-**(P2) Low-rank query-probe sketch (primary contribution).** Approximate the column-sum of `S` using `r ≪ N` representative "probe" queries instead of all N real queries. Precompute, per layer/head, a small set of probes `P = {p_1..p_r}` from a calibration corpus (top-r PCA components of observed queries, or k-means centroids). Then:
-
-```
-a_mj  = softmax over j of ( p_m · k_j / √d )      # r independent softmaxes over keys
-imp(j) = Σ_m  α_m · a_mj                            # α_m optional PCA-eigenvalue weights
-```
-
-Cost is O(r·N·d) with `r` in ~8–32, and it needs neither the real queries at decode time nor the N×N matrix. It is a rank-`r` sketch of the true importance column-sum.
-
-**(P3) Sketch + position prior (composed).** Force-keep sinks + recent window, rank the *rest* by P2. This is the intended production form; sinks and recency are cheap and known to be high-value, so spending the sketch budget on the ambiguous middle is the right allocation.
-
-**Kernel-compatibility argument.** P1–P3 are all O(N·d) or O(r·N·d) and depend only on `K`, `V`, and fixed probes — no query-key score matrix. In a prototype they run as a cheap **second pass** alongside standard FlashAttention (attention output is computed normally; the proxy is computed separately and used only to decide eviction). A production version fuses the probe dot-products into the prefill kernel. The prototype already validates the science; fusion is an engineering follow-up and is explicitly out of scope for v1.
+**What elevates this above "metric collector" papers:** most work reports that effective dimension *correlates* with generalization. This posits a **causal mechanism** — effective dimension *dictates* the peak location — with a pre-registered kill condition. Theory → derived prediction → measurement that can disprove it. Physics-of-AI, not "train sparse nets and report numbers."
 
 ---
 
-## 5. Baselines
+## 3. Known risks and how the design addresses them
 
-A clean ladder from lower bound to upper bound, so any result is anchored on both sides:
+### Risk A — Effective dimension is ill-defined and expensive
+Multiple non-equivalent definitions exist (eigenvalue-threshold count, trace-based, `Σ λᵢ/(λᵢ+α)`). Estimation on real nets requires stochastic approximation.
 
-| Tier | Method | Score-based? | Kernel-native? | Role |
-|---|---|---|---|---|
-| Floor | Random eviction | no | yes | sanity lower bound |
-| Position-only | **StreamingLLM** (sink + window) | no | **yes** | the control to beat |
-| Ours (norms) | P1 key/value norm | no | yes | ablation |
-| **Ours** | **P2/P3 probe sketch** | **no** | **yes** | the proposed method |
-| Score ceiling | **H2O** (heavy-hitters) | **yes** | **no** | quality target |
-| Score ceiling | SnapKV | yes | no | quality target (prompt-aware) |
-| Absolute ceiling | Full cache (no eviction) | — | yes | upper bound |
+**Mitigation:**
+- Pre-register **three definitions** (Maddox-style `N_eff(α) = Σ λᵢ/(λᵢ+α)`, spectral-gap count, Hessian trace via Hutchinson) and report all three. Collapse under ≥1 pre-registered definition with the others reported honestly = credible; cherry-picking after the fact = not.
+- Use **PyHessian** (Lanczos + Hutchinson, designed for exactly this) — spectral density on ResNet-scale nets is feasible on a single GPU.
+- Quantify estimator noise: repeat estimation with k random probe vectors, report CIs.
 
-The two comparisons that carry the paper: **P3 vs StreamingLLM** (does content help over position alone, kernel-native to kernel-native?) and **P3 vs H2O** (how close to the score-based ceiling, and at what latency?).
+### Risk B — SDD needs label noise (artificial regime)
+Peaks are most visible with 10–20% symmetric label noise.
 
----
+**Mitigation:** Run the noise level as a controlled axis {0%, 10%, 20%}. If collapse holds *across* noise levels, that strengthens the claim; if it only holds under noise, say so explicitly. Framing: label noise is the standard magnifying glass for interpolation-threshold phenomena (same as in the original deep double descent work), not a bug.
 
-## 6. Experimental setup
+### Risk C — DST vs. static pruning differ in more than effective dimension
+Mask exploration, training dynamics, and implicit regularization are confounded. A failed collapse wouldn't cleanly falsify the theory.
 
-**Models.** Start with one 7–8B long-context model (e.g., Llama-3.1-8B-Instruct or Qwen2.5-7B-Instruct, 128K context). Add a second model family before publishing to show the effect isn't model-specific. Use a ~1.5B model for fast iteration during development.
+**Mitigation — third and fourth conditions:**
+1. **Static random pruning** (no magnitude criterion) — different mask structure, removes magnitude-pruning bias.
+2. **DST with frozen final mask retrained from scratch** — isolates the *mask* from the *dynamics*. If effective dimension is the governing quantity, this condition should land on the same collapsed curve as its parent DST run.
 
-**Datasets / tasks.**
-- **LongBench** (multi-doc QA, summarization, few-shot, code) — primary quality suite.
-- **Needle-in-a-Haystack (NIAH)** across depths × context lengths — retrieval stress test; eviction methods often fail here, so it's diagnostic.
-- **RULER** — harder synthetic long-context, less saturated than NIAH.
-- **Perplexity** on held-out long documents (PG-19 / a code corpus) — cheap smoke test during development.
-
-**Cache budgets.** Sweep retained fraction `{5, 10, 20, 30, 50}%` of full cache. The interesting regime is 10–30%.
-
-**Hardware.** Single A100/H100 80GB. Fix batch size, dtype (bf16), and sequence lengths across all methods; log the exact kernel path each method takes.
+With four conditions, either the curves collapse (strong positive) or the *pattern of failure* localizes what else matters (still a finding).
 
 ---
 
-## 7. Metrics
+## 4. Experimental design
 
-**Quality.** Task score per LongBench subtask; NIAH/RULER accuracy heatmap over (depth, length); perplexity. Always reported **at matched budget**.
+**Scale (deliberately small — this must run on free/cheap compute):**
 
-**Efficiency (the part most eviction papers under-report).**
-- Prefill latency and decode latency (ms/token).
-- Peak GPU memory and KV-cache bytes.
-- Tokens/sec end-to-end.
-- **Kernel path flag**: did the method run FlashAttention, or did it fall back to materialized attention? Report the throughput penalty of falling back explicitly — this is the whole thesis.
+| Axis | Values |
+|---|---|
+| Dataset | CIFAR-10 (CIFAR-100 as robustness check if time permits) |
+| Architecture | ResNet-18 (standard for SDD replication) |
+| Sparsity levels | ~10 points, log-spaced, 50%→99.5% (dense around the expected peak) |
+| Methods | Static magnitude prune, static random prune, DST (RigL or SET), DST-mask-retrain |
+| Label noise | 0%, 10%, 20% |
+| Seeds | 3 per cell |
 
-**The headline plot.** Quality (y) vs tokens/sec (x), one point per method per budget. The claim succeeds iff the proxy method sits **up-and-to-the-right** of both StreamingLLM and H2O — i.e., it dominates the accuracy/throughput frontier.
+**Measurements per trained model:** test error, train error (confirm interpolation), Hessian eigenspectrum via PyHessian (top-k eigenvalues + trace + spectral density), all three effective-dimension definitions.
 
----
+**Analysis:** For each method, locate peak in (nominal sparsity, test error) space. Then re-plot all methods in (effective dimension, test error) space. Success metric: peak locations align in effective-dimension coordinates within seed-level confidence intervals. Quantify with peak-location distance ratio (spread in eff-dim coords ÷ spread in nominal-sparsity coords) — a number reviewers can grab.
 
-## 8. Implementation plan (PyTorch)
-
-Built on HuggingFace `transformers`, whose `Cache` API is the natural extension point (models accept `past_key_values=<Cache>`; a `Cache` implements `update(...)` and can evict). HF ships `SinkCache` (StreamingLLM) and `DynamicCache` (full cache) — two baselines for free.
-
-### 8.1 Environment
-
-```bash
-pip install "torch>=2.4" transformers accelerate datasets flash-attn --break-system-packages
-# load models with attn_implementation="flash_attention_2"
-```
-
-### 8.2 Core abstraction: a proxy-eviction cache
-
-```python
-# score_free_cache.py
-import torch
-from transformers.cache_utils import DynamicCache
-
-class ScoreFreeEvictCache(DynamicCache):
-    """
-    KV cache that evicts down to `budget` tokens per layer using a *score-free*
-    importance proxy. Never materializes an N×N attention matrix.
-
-    proxy: one of {"random", "knorm", "vnorm", "kvnorm", "sketch"}
-    sinks / recent: always-kept sink prefix and recent window (StreamingLLM prior)
-    probes: dict[layer_idx] -> Tensor[num_kv_heads, r, head_dim]  (for "sketch")
-    """
-    def __init__(self, budget, proxy="sketch", sinks=4, recent=64, probes=None):
-        super().__init__()
-        self.budget = budget
-        self.proxy = proxy
-        self.sinks = sinks
-        self.recent = recent
-        self.probes = probes or {}
-
-    def _importance(self, layer_idx, k, v):
-        # k, v: [B, H_kv, T, D]
-        if self.proxy == "random":
-            return torch.rand(k.shape[:3], device=k.device)   # [B,H,T]
-        if self.proxy == "knorm":
-            return k.norm(dim=-1)
-        if self.proxy == "vnorm":
-            return v.norm(dim=-1)
-        if self.proxy == "kvnorm":
-            return k.norm(dim=-1) * v.norm(dim=-1)
-        if self.proxy == "sketch":
-            P = self.probes[layer_idx].to(k.dtype)            # [H_kv, r, D]
-            d = k.shape[-1] ** 0.5
-            # scores: [B,H,r,T] = probes · keys
-            s = torch.einsum("hrd,bhtd->bhrt", P, k) / d
-            a = torch.softmax(s, dim=-1)                       # softmax over keys T
-            return a.sum(dim=2)                                # Σ_r  -> [B,H,T]
-        raise ValueError(self.proxy)
-
-    def _evict(self, layer_idx):
-        k = self.key_cache[layer_idx]      # [B,H,T,D]
-        v = self.value_cache[layer_idx]
-        B, H, T, D = k.shape
-        if T <= self.budget:
-            return
-        imp = self._importance(layer_idx, k, v)               # [B,H,T]
-        # force-keep sinks + recent window (StreamingLLM prior)
-        imp[..., : self.sinks] = float("inf")
-        imp[..., T - self.recent :] = float("inf")
-        keep = imp.topk(self.budget, dim=-1).indices          # [B,H,budget]
-        keep, _ = keep.sort(dim=-1)                            # preserve order
-        idx = keep.unsqueeze(-1).expand(-1, -1, -1, D)
-        self.key_cache[layer_idx]   = k.gather(2, idx)
-        self.value_cache[layer_idx] = v.gather(2, idx)
-
-    def update(self, key_states, value_states, layer_idx, cache_kwargs=None):
-        k, v = super().update(key_states, value_states, layer_idx, cache_kwargs)
-        self._evict(layer_idx)
-        return self.key_cache[layer_idx], self.value_cache[layer_idx]
-```
-
-> Note: real per-head eviction with GQA needs per-head index bookkeeping so all heads in the cache stay length-aligned; the simplest correct v1 evicts on the **mean importance across heads** (single shared keep-set per layer). Start there; add head-independent eviction as an ablation.
-
-### 8.3 Building probes from calibration
-
-```python
-# build_probes.py — collect queries per layer/head, take top-r PCA directions
-import torch
-
-@torch.no_grad()
-def collect_queries(model, tokenizer, texts, layers, max_len=4096):
-    buf = {l: [] for l in layers}
-    hooks = []
-    def mk(l):
-        def hook(mod, inp, out):
-            # out or a projected q; capture q_proj output, reshape to [*, H, D]
-            buf[l].append(out.detach().float().cpu())
-        return hook
-    for l in layers:
-        hooks.append(model.model.layers[l].self_attn.q_proj.register_forward_hook(mk(l)))
-    for t in texts:
-        ids = tokenizer(t, return_tensors="pt", truncation=True,
-                        max_length=max_len).input_ids.to(model.device)
-        model(ids)
-    for h in hooks: h.remove()
-    return {l: torch.cat(v, 0) for l, v in buf.items()}   # [tokens, H*D] per layer
-
-def pca_probes(Q, num_kv_heads, head_dim, r=16):
-    # Q: [N, H*D] -> per-head top-r right singular vectors -> [H_kv, r, D]
-    H = Q.shape[1] // head_dim
-    Q = Q.view(-1, H, head_dim)
-    probes = []
-    for h in range(H):
-        Xc = Q[:, h] - Q[:, h].mean(0, keepdim=True)
-        _, _, Vh = torch.linalg.svd(Xc, full_matrices=False)
-        probes.append(Vh[:r])                              # [r, D]
-    probes = torch.stack(probes)                           # [H, r, D]
-    # map query heads -> kv heads for GQA (group-mean) if H != num_kv_heads
-    if H != num_kv_heads:
-        g = H // num_kv_heads
-        probes = probes.view(num_kv_heads, g, r, head_dim).mean(1)
-    return probes                                          # [H_kv, r, D]
-```
-
-### 8.4 Baselines
-
-- **Full cache:** `DynamicCache()` (HF default).
-- **StreamingLLM:** HF `SinkCache(window_length=budget, num_sink_tokens=4)`.
-- **Random / norms:** `ScoreFreeEvictCache(proxy="random" | "knorm" | ...)`.
-- **H2O / SnapKV (score-based ceilings):** these need attention weights, so run them with `attn_implementation="eager"` (materialized scores) and accumulate per-key attention mass to drive eviction. Wrap in their own cache subclass. **Log that they force the eager path** — that penalty is a result, not a nuisance.
-
-### 8.5 Evaluation harness (skeleton)
-
-```python
-# run_eval.py
-def evaluate(model, tokenizer, task, cache_factory, budget):
-    latencies, correct = [], 0
-    for ex in task:
-        cache = cache_factory(budget)
-        ids = tokenizer(ex["prompt"], return_tensors="pt").input_ids.to(model.device)
-        torch.cuda.synchronize(); t0 = time.time()
-        out = model.generate(ids, past_key_values=cache, max_new_tokens=ex["gen_len"],
-                             use_cache=True)
-        torch.cuda.synchronize(); latencies.append(time.time() - t0)
-        correct += task.score(ex, tokenizer.decode(out[0, ids.shape[1]:]))
-    return dict(acc=correct/len(task),
-                ms_per_tok=1e3*sum(latencies)/total_tokens,
-                peak_mem=torch.cuda.max_memory_allocated())
-```
-
-Sweep `{method} × {budget} × {task}`; dump to a dataframe; render the quality-vs-throughput frontier plot.
+**Compute budget:** ~360 training runs of ResNet-18/CIFAR-10 (~1 GPU-hr each on a T4/A10). Phased: Phase 1 (core 2 methods × 1 noise level × 10 sparsities × 3 seeds = 60 runs) is a Colab Pro / Kaggle / GSU-cluster-sized job. Phase 2 expands only if Phase 1 shows signal.
 
 ---
 
-## 9. Experimental protocol (phases)
+## 5. Timeline (today → Fall 2027 offer)
 
-1. **Plumbing.** Full-cache + StreamingLLM + random on the 1.5B model, short contexts, perplexity only. Confirms the cache wiring and eviction don't corrupt generation.
-2. **Baselines.** Add H2O/SnapKV (eager path). Confirm they reproduce published quality and **measure their kernel-path throughput penalty**.
-3. **Proxies.** Add P1 norms, then P2/P3 sketch + probe calibration. LongBench + NIAH at all budgets.
-4. **Frontier.** The quality-vs-throughput plot on the 8B model. Test H1/H2/H3 against thresholds.
-5. **Generalize.** Second model family; RULER; head-independent eviction ablation.
+| When | What |
+|---|---|
+| **Jul 2026** | **Pre-register the experimental plan** (§7): hypotheses, all four conditions, three effective-dim definitions, kill condition — on OSF (or a timestamped public GitHub repo/wiki). Do this *before* the first training run. |
+| **Jul–Aug 2026** | Replicate He et al. SDD baseline. Get PyHessian pipeline working. Phase 1 runs. |
+| **Sep 2026** | Analysis, first collapse plot. Write 4–6 page workshop-style writeup + arXiv preprint (even preliminary). |
+| **Oct 2026** | **Cold outreach to the 5 professors below** — this is the peak window: after summer, before their inboxes flood with generic Dec applicants. Attach the preprint + one killer figure. |
+| **Nov 2026** | Follow-ups, Zoom calls with responders. Incorporate their feedback into Phase 2 runs — instant advisor-fit signal. |
+| **Dec 2026** | Applications due (UNC ~Dec 10, MSU/UMN/Rice typically Dec 1–15 — verify each). Named professor in SOP, ideally after having spoken with them. |
+| **Jan–Mar 2027** | Interviews. Phase 2 / CIFAR-100 results as fresh material to discuss. |
+| **Spring 2027** | Offers. Funded PhD = RA/TA/fellowship; a professor who wants you *is* the funding at these schools. |
 
-Gate: if Phase 2 shows H2O's fallback penalty is negligible on your hardware/kernels, the core motivation weakens — **re-scope before Phase 3** rather than after.
-
----
-
-## 10. Ablations
-
-- `r ∈ {4, 8, 16, 32}` probes — quality vs sketch cost.
-- Probe source: PCA vs k-means vs mean-query vs random directions.
-- Norms vs sketch vs (norms + sketch).
-- Shared-across-heads vs per-head eviction.
-- Sink/recent window sizes.
-- Calibration domain shift (calibrate on domain A, test on B).
-- Layer-wise budgets (early layers keep more, per PyramidInfer-style intuition).
+The critical path is **preliminary results by end of September**. Everything downstream depends on the outreach email containing a figure, not a promise.
 
 ---
 
-## 11. Expected outcomes and interpretation
+## 6. Target professors and per-professor framing
 
-- **Success:** P3 lands ≥70% of the way from StreamingLLM to H2O on LongBench at 20–30% budget (H1), while beating H2O on tokens/sec at matched quality (H2). Headline frontier plot dominates.
-- **Partial:** P3 beats StreamingLLM but trails H2O substantially — still publishable as "content helps score-free eviction," with an honest quality gap and a throughput win.
-- **Negative:** P3 ≈ StreamingLLM. That means position priors already capture what cheap content signals offer, which is itself a clean, useful finding (and points toward needing the actual scores — i.e., the fusion/kernel-modification route, not proxies).
+The proposal core stays identical; the *emphasis paragraph* in each email changes.
 
-Pre-registering these three readings keeps a null result informative.
+### 1. Tianlong Chen — UNC Chapel Hill (QS #140) — **Priority 1**
+- **Why him:** Sparsity/lottery-ticket work is his core identity; heavily funded (Meta ×3, Amazon ×2, Cisco ×4, IBM, NIH); actively recruiting PhD students.
+- **Angle:** Frame as extending the lottery-ticket/sparsity research program with a *theory-first* falsifiable experiment — the effective-dimension lens as a unifying explanation for when sparse subnetworks match dense performance. Cite his sparsity papers specifically.
+- **Hook line:** "Your work established *that* sparse subnetworks generalize; this experiment tests *what quantity governs when* they stop."
+
+### 2. Sijia Liu — Michigan State (QS #161) — **Priority 1**
+- **Why him:** Directly works on the *theory* of pruning and LTH (bi-level optimization for pruning); NSF CAREER 2024, ARO, Cisco, MIT-IBM Watson affiliate.
+- **Angle:** Lead with the theoretical claim and the falsification structure — he's the most theory-oriented of the five. The bi-level-optimization connection: effective dimension as the quantity a principled pruning objective should target. Cite Curth et al. explicitly — the "wrong axis" critique is exactly the kind of foundational question theory people care about.
+- **Hook line:** the pre-registered kill condition (§1) — and state explicitly that you'll **publish the negative result if the hypothesis fails**. Willingness to be wrong in public signals scientific maturity over number-chasing; this lands hardest with him.
+
+### 3. Caiwen Ding — Minnesota (QS ~150s)
+- **Why him:** Algorithm–hardware co-design of sparse ML; explicitly recruiting with full financial support; NSF CAREER 2024, 24+ grants.
+- **Angle:** Systems/efficiency framing — if effective dimension predicts the safe sparsity ceiling, it becomes a *design rule* for hardware-aware sparsity budgets rather than trial-and-error. Lead with execution credibility: a theory-only pitch from a student is risky, but a theory-driven pitch backed by a production-grade evaluation pipeline (PyHessian + your CI/CD, AWS, LLM-eval infrastructure track record) is exactly what co-design labs need — students who can get things to work.
+- **Hook line:** "A predictive rule for how sparse you can go before the accuracy cliff — measured, not guessed."
+
+### 4. Anshumali Shrivastava — Rice (QS ~140s)
+- **Why him:** SLIDE, contextual sparsity for LLMs, dynamic sparse attention; large-scale ML focus.
+- **Caveat first:** Meta Superintelligence Labs affiliation — **verify advising bandwidth before investing** (check his page for "recruiting" language, or ask directly in email #1; a fast no is fine).
+- **Angle:** Scale trajectory — CIFAR/ResNet is the controlled testbed, but the question "what governs the sparsity ceiling" is exactly the contextual-sparsity-for-LLMs question. Position the experiment as the rigorous small-scale version of what his group bets on at scale.
+
+### 5. Flex pick — outside the QS 100–200 band
+Since the band constraint is soft, add **one** of the pure-DST cluster as a fifth email:
+- **Xiaolong Ma (U Arizona)** — core DST publications, NSF panelist, recently +$640K funding → likely has open funded slots. **Best default choice:** funding recency + core-DST fit.
+- Alternatives: Yanzhi Wang (Northeastern), Geng Yuan (UGA); Zhangyang "Atlas" Wang (UT Austin, ~top 70) is the reach — worth one email since the marginal cost is near zero and he's *the* lottery-ticket figure.
+
+**Outreach mechanics:** ≤150-word email, one attached figure (the collapse plot), preprint link, **link to the pre-registered plan** ("pre-registered on OSF before the first run" is a one-clause credibility bomb), one sentence of specific engagement with *their* paper, one clear ask ("are you taking funded PhD students for Fall 2027?"). No CV wall-of-text — link it.
 
 ---
 
-## 12. Risks and mitigations
+## 7. Pre-registration (do this before the first training run)
 
-- **Proxy just relearns recency.** If P2 without the position prior mostly keeps recent tokens, it adds nothing over StreamingLLM. *Mitigation:* report P2 alone (no sink/recent forcing) to isolate content signal; inspect kept-index distributions.
-- **NIAH cliff.** Eviction notoriously drops the needle. *Mitigation:* treat NIAH as a diagnostic, not just a number; analyze at which depth/length the proxy fails and whether the sketch can be biased toward rare high-norm keys.
-- **Prototype ≠ fused kernel.** The v1 "second pass" proves quality and *plausible* speed, not the final fused throughput. *Mitigation:* be explicit that fusion is future work; still measure the second-pass overhead so the claim is bounded.
-- **H2O fallback penalty is hardware/kernel-dependent.** *Mitigation:* the Phase-2 gate; report the penalty as a measured quantity on your exact stack, not a general claim.
-- **Prefill is untouched.** This method compresses the cache, not the O(N²) prefill. *Mitigation:* scope the paper to decode/memory; don't overclaim.
+**Status of novelty check: ✅ complete (Jul 2026).** Gap confirmed — no existing work uses effective dimension predictively for SDD peak location, or the DST-vs-static gap as a controlled test (see §2). One residual watch item: recheck OpenReview around ICLR 2027 submission time and monitor the target labs' arXiv output monthly; if something appears, the mask-retrain ablation (§3 Risk C) is the fallback novelty.
+
+**Pre-registration protocol (OSF, or a timestamped public GitHub repo):**
+1. **Hypotheses:** primary (curves collapse in effective-dim coordinates) and the explicit kill condition.
+2. **All four conditions:** static magnitude, static random, DST (RigL/SET), DST-mask-retrain.
+3. **All three effective-dim definitions**, named in advance, with the commitment to report all three regardless of outcome.
+4. **Success metric:** peak-location distance ratio, defined before seeing data.
+5. **Noise levels, sparsity grid, seeds** — the full §4 table, frozen.
+
+This costs half a day and converts "student with an idea" into "researcher running a pre-registered study." It also inoculates against the cherry-picking critique in §3 Risk A — the definitions were fixed before the data existed, provably.
 
 ---
 
-## 13. Reference points (position against, not cite verbatim)
+## 8. Deliverables checklist
 
-H2O (heavy-hitter eviction, NeurIPS 2023), SnapKV (prompt-aware selection), StreamingLLM (attention sinks + window), Ada-KV (adaptive per-head budget), Quest / InfiniGen (query-aware sparse loading), Expected Attention (compression via future-query estimation), FlashAttention-2 (the kernel whose score-hiding motivates this work). Do a fresh arXiv/OpenReview pass before writing — this subfield ships weekly, and score-free eviction under kernel constraints is exactly the kind of idea someone may have just posted.
+- [x] Novelty check complete — gap confirmed (Jul 2026)
+- [ ] Pre-registered plan live on OSF/GitHub (before first run)
+- [ ] SDD baseline replicated (He et al. setup)
+- [ ] PyHessian pipeline validated (CI-quantified effective-dim estimates)
+- [ ] Phase 1 runs done (60 runs)
+- [ ] The Figure: test error vs. nominal sparsity (messy) side-by-side with test error vs. effective dimension (collapsed)
+- [ ] arXiv preprint (4–6 pages + appendix)
+- [ ] 5 personalized outreach emails drafted
+- [ ] Applications submitted by early Dec 2026 with professor named in each SOP
