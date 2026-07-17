@@ -1,89 +1,73 @@
-# Pre-Registration: Effective Dimension Predicts the Sparse Double Descent Peak
+# Pre-registration — Sparse On-Device Adaptation for Crop Screening Under Drift
 
-**Author:** Nazmul Alam · **Date frozen:** [YYYY-MM-DD, set at commit] · **Status:** DRAFT — freeze after pipeline validation (§8)
+*Frozen before the first adaptation run. Amendments are logged with date + reason at the bottom; the original hypotheses are never edited in place.*
 
-This document fixes hypotheses, conditions, measurements, and analysis *before* any confirmatory run. After freezing, it is edited only via dated entries in §9 (Deviations).
+## 1. Question
 
----
+In a low-connectivity deployment, can a compressed crop-disease classifier recover accuracy lost to distribution drift by adapting **on-device**, **without labels**, and by updating only a **sparse subset** of its parameters within a fixed edge budget?
 
-## 1. Hypotheses
+## 2. Primary hypothesis (H1)
 
-**H1 (primary).** The location of the sparse double descent (SDD) test-error peak is governed by effective dimension (d_eff), not nominal sparsity. Networks trained with different sparsification methods peak at different nominal sparsities but at the same d_eff.
+Label-free sparse on-device adaptation recovers a **recovery ratio ≥ 0.30** — i.e. closes at least 30% of the `frozen → cloud-oracle` accuracy gap — averaged across the pre-registered drift types, while its per-update memory footprint stays within the target tier's budget.
 
-**H2 (mechanism isolation).** A frozen final DST mask, retrained from scratch, lands on the same collapsed curve as its parent DST run — i.e., the mask's effect on the peak is fully mediated by d_eff, not by DST training dynamics.
+## 3. Secondary hypotheses
 
-**Kill condition.** H1 is falsified if, under *all three* pre-registered d_eff definitions (§4), the peak-alignment criterion (§6) fails. Partial support (alignment under some definitions) will be reported as such, with all three definitions shown. **The result will be written up and posted publicly regardless of outcome.**
+- **H2 (stability):** Under the streaming protocol, the sparse-update method never drops below the frozen baseline accuracy at any checkpoint (no net-harmful adaptation).
+- **H3 (sparsity efficiency):** Updating a selected sparse subset (k ≤ 25% of adaptable params) reaches ≥ 90% of the recovery achieved by full-parameter adaptation, at a fraction of the memory cost.
+- **H4 (safety):** An entropy/energy-based abstention gate improves selective accuracy (accuracy on non-abstained samples) versus no gate, under drift.
 
----
+## 4. Kill condition (falsification)
 
-## 2. Design
+H1 is falsified if **either** of the following holds after Phase 1 + Phase 2:
 
-| Factor | Levels |
-|---|---|
-| Dataset | CIFAR-10 |
-| Architecture | ResNet-18 (setup replicating He et al., ICML 2022) |
-| Method | (a) static magnitude prune · (b) static random prune · (c) DST: RigL · (d) DST-mask-retrain |
-| Nominal sparsity | 10 log-spaced levels in [0.50, 0.995]; grid may be densified near observed peaks (§7, adaptive rule) |
-| Label noise | 0%, 10%, 20% symmetric |
-| Seeds | 3 per cell |
+1. Mean recovery ratio across all drift types is **< 0.30**, **or**
+2. The sparse-update method drops **below** the frozen baseline at **any** checkpoint of the streaming protocol.
 
-**Condition (d) construction:** take the final mask from each condition-(c) run, freeze it, re-initialize weights, train statically. Same seed pairing as parent run.
+A falsified H1 is written up and released as a negative result. No re-specification of H1 after seeing results.
 
-**Phasing.** Phase 1 (confirmatory core): methods (a) + (c), 10% noise, full sparsity grid, 3 seeds = 60 runs. Phases 2–3 add methods (b), (d) and noise levels {0%, 20%}. Phase 1 alone can trigger the kill condition; later phases cannot rescue H1 if Phase 1 falsifies it.
+## 5. Fixed experimental variables
 
-**Training protocol:** identical optimizer, schedule, epochs, and augmentation across all conditions; hyperparameters fixed at He et al. replication values before Phase 1 and recorded in `configs/`. Models must reach ≤1% train error (interpolation) to enter analysis; non-interpolating runs are reported but excluded from peak estimation.
+| Variable        | Setting                                                                                              |
+| --------------- | --------------------------------------------------------------------------------------------------- |
+| Source dataset  | PlantVillage (lab), fixed train/val split (seed-fixed)                                               |
+| Drift datasets  | (a) PlantDoc, (b) Cassava Leaf Disease, (c) synthetic-corruption suite over PlantVillage test set   |
+| Backbones       | MobileNetV2-0.35, MCUNet — both int8                                                                 |
+| Edge tiers      | MCU (≤ 256 KB train mem) · cheap-device (Pi Zero 2 W / low-end Android)                              |
+| Seeds           | {0, 1, 2}                                                                                            |
+| Class mapping   | Restricted to disease classes shared across source and each drift target (documented in `configs/`) |
 
----
+## 6. Conditions (adaptation methods)
 
-## 3. Measurements (per trained model)
+1. **Frozen** — no adaptation (lower bound).
+2. **BN-recal** — recompute BatchNorm running statistics on unlabeled target stream.
+3. **TENT** — entropy minimisation, BatchNorm affine params only.
+4. **Sparse on-device update (core)** — self-supervised objective; update only a selected sparse parameter subset (selection rule pre-registered in `configs/sparse_select.yaml`).
+5. **Pseudo-label self-training** — confidence-thresholded self-labels.
+6. **Cloud oracle** — full supervised retrain on labelled target (upper bound; not deployable).
 
-1. Test error, train error (interpolation check)
-2. Hessian eigenspectrum at convergence via PyHessian: top-50 eigenvalues (Lanczos), trace (Hutchinson, 100 probe vectors), spectral density
-3. All three d_eff definitions (§4)
-4. Estimator uncertainty: Hutchinson repeated with 5 independent probe sets → CI per estimate
+Selection rule for condition 4 is fixed in advance (e.g. gradient-magnitude top-k on a held-out warmup batch) and not tuned on the drift test sets.
 
-Hessian computed on the training set (loss landscape the optimizer saw), full network, at final checkpoint.
+## 7. Metrics (pre-specified)
 
-## 4. Effective-dimension definitions (all three reported, always)
+- **Primary:** recovery ratio `(adapted − frozen) / (oracle − frozen)`.
+- Accuracy under drift (top-1).
+- Per-update: peak RAM, FLOPs, latency, estimated energy — measured on the target tier.
+- Streaming trajectory: accuracy at fixed checkpoints; min accuracy over the stream.
+- Calibration (ECE); selective accuracy vs. coverage for the abstention gate.
 
-| ID | Definition | Notes |
-|---|---|---|
-| D1 | N_eff(α) = Σᵢ λᵢ/(λᵢ+α), Maddox et al. 2020 | α = 1/n·(loss curvature scale); α fixed after pilot (§8), before Phase 1 |
-| D2 | Spectral-gap count: #{λᵢ > λ_bulk edge} | bulk edge estimated from spectral density |
-| D3 | Hessian trace (Hutchinson) | scale proxy; no threshold parameter |
+## 8. Analysis plan
 
-No additional definitions may be introduced post hoc for confirmatory claims.
+- Report mean ± CI over 3 seeds for every cell.
+- H1 decided on the mean recovery ratio across the three drift types.
+- H3 tested by sweeping k ∈ {5, 10, 25, 50, 100}% and comparing recovery vs. memory.
+- No dataset, class set, budget, or metric is added after unblinding.
 
-## 5. Peak estimation
+## 9. Compute & scope
 
-Per (method × noise × definition): fit test-error curve vs. axis variable with local regression (LOESS, span fixed at 0.4); peak = argmax of fit within the sampled range. Peak-location CI via bootstrap over seeds (1000 resamples).
-
-## 6. Confirmatory metric and decision rule
-
-**Collapse ratio** R = (spread of peak locations across methods in log-d_eff coordinates) ÷ (spread in log(1−sparsity) coordinates), spread = max−min across methods.
-
-- **H1 supported** under definition Dk if R < 0.33 and peak-location CIs overlap in d_eff coordinates.
-- **H1 falsified** if R ≥ 0.67 under all of D1–D3, or CIs disjoint in d_eff coordinates under all three.
-- Intermediate outcomes reported as inconclusive-partial, with all values shown.
-
-Thresholds (0.33 / 0.67) are fixed now, acknowledged as conventional rather than derived.
-
-## 7. Adaptive elements (pre-declared)
-
-Only two adaptations are permitted without a §9 deviation entry:
-1. Adding sparsity grid points *between* existing ones to localize a peak (never removing points).
-2. Increasing Hutchinson probe count if CI width exceeds 10% of the estimate.
-
-## 8. Pilot phase (pre-freeze)
-
-Before freezing: one throwaway run per method to (a) validate the PyHessian pipeline end-to-end, (b) confirm per-run compute cost, (c) fix α for D1 and the LOESS span. Pilot runs are excluded from confirmatory analysis. The freeze commit happens immediately after, and its hash is recorded here: `[commit hash]`.
-
-## 9. Deviations log
-
-| Date | Change | Reason |
-|---|---|---|
-| — | — | — |
+Phase 1 (batch, all conditions × backbones × drift types × 3 seeds) is the minimum publishable unit. Phase 2 (streaming stability) extends the core condition only. Hardware profiling done on one physical device per tier.
 
 ---
 
-*References: He et al. (ICML 2022); Curth et al. (NeurIPS 2023); Maddox et al. (2020); Evci et al. (ICML 2020); Yao et al., PyHessian (2020).*
+### Amendment log
+
+*(date — what changed — why. Original section text above is never edited.)*
